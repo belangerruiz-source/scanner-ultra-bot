@@ -11,7 +11,9 @@ from telegram.ext import (
 
 TOKEN = os.getenv("TOKEN")
 
-# Monedas a revisar
+# =========================
+# PARES A ANALIZAR
+# =========================
 coins = {
     "TRX/USDT": "tron",
     "ADA/USDT": "cardano",
@@ -20,7 +22,7 @@ coins = {
 
 
 # =========================
-# DATOS
+# CONSULTA PRECIOS
 # =========================
 def datos_coin(id_coin):
     try:
@@ -59,18 +61,18 @@ def confianza(cambio):
     if cambio is None:
         return 0
 
-    base = 70 - abs(cambio * 10)
+    score = 72 - abs(cambio * 8)
 
     if cambio > 0:
-        base += 8
+        score += 8
 
-    if base < 55:
-        base = 55
+    if score < 55:
+        score = 55
 
-    if base > 88:
-        base = 88
+    if score > 90:
+        score = 90
 
-    return int(base)
+    return int(score)
 
 
 def accion(cambio):
@@ -85,90 +87,154 @@ def accion(cambio):
 
 
 # =========================
-# ANALISIS
+# MEJOR PAR
 # =========================
-def analizar():
-    resultados = []
-
-    texto = "ESCÁNER ULTRA V6\n\n"
+def mejor_par():
+    lista = []
 
     for par, coin in coins.items():
+        precio, cambio = datos_coin(coin)
 
+        if precio is not None:
+            lista.append((par, precio, cambio))
+
+    if not lista:
+        return None
+
+    # Menor volatilidad = más estable
+    mejor = sorted(lista, key=lambda x: abs(x[2]))[0]
+
+    return mejor
+
+
+# =========================
+# ESCANEO GENERAL
+# =========================
+def escanear():
+    texto = "ESCÁNER ULTRA V6.5\n\n"
+
+    lista = []
+
+    for par, coin in coins.items():
         precio, cambio = datos_coin(coin)
 
         if precio is None:
             texto += f"{par}: Error\n"
             continue
 
-        est = estado(cambio)
+        texto += f"{par}: {estado(cambio)} | {round(cambio,2)}%\n"
+        lista.append((par, precio, cambio))
 
-        texto += f"{par}: {est} | {round(cambio,2)}%\n"
-
-        resultados.append((par, precio, cambio))
-
-    if not resultados:
+    if not lista:
         return texto + "\nSin datos."
 
-    # Mejor par = menor volatilidad y no tan rojo
-    mejor = sorted(resultados, key=lambda x: abs(x[2]))[0]
+    mejor = sorted(lista, key=lambda x: abs(x[2]))[0]
 
     par = mejor[0]
     precio = mejor[1]
     cambio = mejor[2]
 
     conf = confianza(cambio)
-    act = accion(cambio)
-
-    # FILTRO NO OPERAR
-    if cambio < -0.50 or conf < 65:
-        texto += "\n------------------\n"
-        texto += "🚫 NO OPERAR HOY\n"
-        texto += "Mercado sin ventaja clara."
-        return texto
-
-    entrada = round(precio * 0.997, 6)
-    tp = round(precio * 1.005, 6)
-    sl = round(precio * 0.992, 6)
 
     texto += "\n------------------\n"
-    texto += f"MEJOR OPCIÓN: {par}\n\n"
-    texto += f"Precio actual: {precio}\n"
-    texto += f"Entrada ideal: {entrada}\n"
-    texto += f"TP: {tp}\n"
-    texto += f"SL: {sl}\n"
-    texto += f"Confianza: {conf}%\n"
-    texto += f"Acción: {act}"
+
+    if cambio < -0.50 or conf < 65:
+        texto += "🚫 NO OPERAR HOY\nMercado sin ventaja clara."
+        return texto
+
+    texto += f"✅ Mejor opción: {par}\n"
+    texto += f"Confianza: {conf}%"
 
     return texto
 
 
 # =========================
-# COMANDOS
+# PREPARAR ENTRADA
+# =========================
+def preparar_entrada():
+    dato = mejor_par()
+
+    if dato is None:
+        return "Sin datos de mercado."
+
+    par, precio, cambio = dato
+    conf = confianza(cambio)
+
+    if cambio < -0.50 or conf < 65:
+        return "🚫 Hoy no conviene entrar."
+
+    entrada = round(precio * 0.997, 6)
+    tp = round(precio * 1.005, 6)
+    sl = round(precio * 0.992, 6)
+
+    texto = f"""
+📌 ENTRADA PREPARADA
+
+Par: {par}
+
+Precio actual: {precio}
+Compra límite: {entrada}
+
+Take Profit: {tp}
+Stop Loss: {sl}
+
+Confianza: {conf}%
+Riesgo: Bajo/Medio
+Monto sugerido: 10 USDT
+"""
+    return texto
+
+
+# =========================
+# CAPITAL
+# =========================
+def ruta_20():
+    texto = """
+💰 RUTA A 20 USDT
+
+Capital actual: 10 USDT
+
+Meta:
++0.20 USDT promedio por operación buena
+
+Necesitas aprox:
+50 operaciones limpias
+
+Regla:
+Solo operar cuando confianza > 70%
+"""
+    return texto
+
+
+# =========================
+# COMANDO START
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
-        [
-            InlineKeyboardButton("🔍 Escanear", callback_data="scan")
-        ],
+        [InlineKeyboardButton("🔍 Escanear", callback_data="scan")],
+        [InlineKeyboardButton("✅ Preparar Entrada", callback_data="entrar")],
         [
             InlineKeyboardButton("📊 Estado", callback_data="estado"),
-            InlineKeyboardButton("🛑 Cerrar", callback_data="cerrar")
-        ]
+            InlineKeyboardButton("💰 Ruta 20", callback_data="ruta")
+        ],
+        [InlineKeyboardButton("🛑 No operar", callback_data="cerrar")]
     ]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        "Bot activo. Usa botones:",
+        "SCANNER ULTRA BOT V6.5",
         reply_markup=reply_markup
     )
 
 
+# =========================
+# COMANDO /SCAN
+# =========================
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Escaneando mercado...")
-    texto = analizar()
-    await update.message.reply_text(texto)
+    await update.message.reply_text(escanear())
 
 
 # =========================
@@ -181,14 +247,19 @@ async def botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "scan":
         await query.message.reply_text("Escaneando mercado...")
-        texto = analizar()
-        await query.message.reply_text(texto)
+        await query.message.reply_text(escanear())
+
+    elif query.data == "entrar":
+        await query.message.reply_text(preparar_entrada())
 
     elif query.data == "estado":
         await query.message.reply_text("Sistema activo ✅")
 
+    elif query.data == "ruta":
+        await query.message.reply_text(ruta_20())
+
     elif query.data == "cerrar":
-        await query.message.reply_text("Sin operación abierta aún.")
+        await query.message.reply_text("🛑 Confirmado: hoy no operamos.")
 
 
 # =========================
