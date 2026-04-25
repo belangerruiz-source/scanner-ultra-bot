@@ -11,16 +11,28 @@ coins = {
     "DOGE/USDT": "dogecoin"
 }
 
-def datos_coin(id_coin):
-    try:
-        url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids={id_coin}"
-        r = requests.get(url, timeout=10).json()[0]
+coins = {
+    "TRX/USDT": "tron",
+    "ADA/USDT": "cardano",
+    "DOGE/USDT": "dogecoin"
+}
 
-        precio = r["current_price"]
-        cambio = r["price_change_percentage_24h"]
+def datos_coin(id_coin):
+    ids = {
+        "tron": "tron",
+        "cardano": "cardano",
+        "dogecoin": "dogecoin"
+    }
+
+    try:
+        url = f"https://api.coincap.io/v2/assets/{ids[id_coin]}"
+        r = requests.get(url, timeout=10).json()["data"]
+
+        precio = float(r["priceUsd"])
+        cambio = float(r["changePercent24Hr"])
 
         return precio, cambio
-    except:
+    except Exception as e:
         return None, None
 
 def estado(cambio):
