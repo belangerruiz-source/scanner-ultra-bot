@@ -1,18 +1,27 @@
 import requests
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import os
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    CallbackQueryHandler
+)
 
 TOKEN = os.getenv("TOKEN")
 
-# Pares a escanear
+# Monedas a revisar
 coins = {
     "TRX/USDT": "tron",
     "ADA/USDT": "cardano",
     "DOGE/USDT": "dogecoin"
 }
 
-# Obtener precio y variación 24h desde CoinGecko
+
+# =========================
+# DATOS
+# =========================
 def datos_coin(id_coin):
     try:
         url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids={id_coin}"
@@ -32,7 +41,9 @@ def datos_coin(id_coin):
         return None, None
 
 
-# Clasificación simple
+# =========================
+# REGLAS
+# =========================
 def estado(cambio):
     if cambio is None:
         return "Error"
@@ -44,19 +55,6 @@ def estado(cambio):
         return "Lateral ➖"
 
 
-# Recomendación principal
-def recomendacion(cambio):
-    if cambio is None:
-        return "Sin datos"
-    elif cambio >= 1:
-        return "Esperar retroceso y entrar límite"
-    elif cambio > -0.5 and cambio < 1:
-        return "Entrada prudente posible"
-    else:
-        return "No entrar aún"
-
-
-# Confianza
 def confianza(cambio):
     if cambio is None:
         return 0
@@ -68,25 +66,34 @@ def confianza(cambio):
 
     if base < 55:
         base = 55
+
     if base > 88:
         base = 88
 
     return int(base)
 
 
-# START
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot activo. Usa /scan")
+def accion(cambio):
+    if cambio is None:
+        return "Sin datos"
+    elif cambio >= 1:
+        return "Esperar retroceso"
+    elif -0.50 <= cambio < 1:
+        return "Entrada prudente"
+    else:
+        return "No entrar"
 
 
-# SCAN
-async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Escaneando mercado...")
-
+# =========================
+# ANALISIS
+# =========================
+def analizar():
     resultados = []
-    texto = "ESCÁNER ULTRA V3\n\n"
+
+    texto = "ESCÁNER ULTRA V6\n\n"
 
     for par, coin in coins.items():
+
         precio, cambio = datos_coin(coin)
 
         if precio is None:
@@ -99,36 +106,99 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         resultados.append((par, precio, cambio))
 
-    if resultados:
+    if not resultados:
+        return texto + "\nSin datos."
 
-        # Mejor par = más cercano a positivo sin estar disparado
-        mejor = sorted(resultados, key=lambda x: abs(x[2]))[0]
+    # Mejor par = menor volatilidad y no tan rojo
+    mejor = sorted(resultados, key=lambda x: abs(x[2]))[0]
 
-        par = mejor[0]
-        precio = mejor[1]
-        cambio = mejor[2]
+    par = mejor[0]
+    precio = mejor[1]
+    cambio = mejor[2]
 
-        entrada = round(precio * 0.997, 6)
-        tp = round(precio * 1.005, 6)
-        sl = round(precio * 0.992, 6)
+    conf = confianza(cambio)
+    act = accion(cambio)
 
-        texto += "\n--------------------\n"
-        texto += f"MEJOR OPCIÓN: {par}\n\n"
-        texto += f"Precio actual: {precio}\n"
-        texto += f"Entrada ideal: {entrada}\n"
-        texto += f"TP: {tp}\n"
-        texto += f"SL: {sl}\n"
-        texto += f"Confianza: {confianza(cambio)}%\n"
-        texto += f"Acción: {recomendacion(cambio)}"
+    # FILTRO NO OPERAR
+    if cambio < -0.50 or conf < 65:
+        texto += "\n------------------\n"
+        texto += "🚫 NO OPERAR HOY\n"
+        texto += "Mercado sin ventaja clara."
+        return texto
 
+    entrada = round(precio * 0.997, 6)
+    tp = round(precio * 1.005, 6)
+    sl = round(precio * 0.992, 6)
+
+    texto += "\n------------------\n"
+    texto += f"MEJOR OPCIÓN: {par}\n\n"
+    texto += f"Precio actual: {precio}\n"
+    texto += f"Entrada ideal: {entrada}\n"
+    texto += f"TP: {tp}\n"
+    texto += f"SL: {sl}\n"
+    texto += f"Confianza: {conf}%\n"
+    texto += f"Acción: {act}"
+
+    return texto
+
+
+# =========================
+# COMANDOS
+# =========================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🔍 Escanear", callback_data="scan")
+        ],
+        [
+            InlineKeyboardButton("📊 Estado", callback_data="estado"),
+            InlineKeyboardButton("🛑 Cerrar", callback_data="cerrar")
+        ]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "Bot activo. Usa botones:",
+        reply_markup=reply_markup
+    )
+
+
+async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Escaneando mercado...")
+    texto = analizar()
     await update.message.reply_text(texto)
 
 
+# =========================
+# BOTONES
+# =========================
+async def botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "scan":
+        await query.message.reply_text("Escaneando mercado...")
+        texto = analizar()
+        await query.message.reply_text(texto)
+
+    elif query.data == "estado":
+        await query.message.reply_text("Sistema activo ✅")
+
+    elif query.data == "cerrar":
+        await query.message.reply_text("Sin operación abierta aún.")
+
+
+# =========================
 # APP
+# =========================
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("scan", scan))
+app.add_handler(CallbackQueryHandler(botones))
 
 print("Bot iniciado...")
 app.run_polling()
