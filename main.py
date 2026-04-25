@@ -6,11 +6,20 @@ import os
 TOKEN = os.getenv("TOKEN")
 
 def precio(symbol):
+    pares = {
+        "TRXUSDT":"tron",
+        "ADAUSDT":"cardano",
+        "DOGEUSDT":"dogecoin"
+    }
+
     try:
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-        r = requests.get(url, timeout=8)
-        data = r.json()
-        return float(data["price"])
+        coin = pares[symbol]
+
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd"
+        r = requests.get(url, timeout=10).json()
+
+        return r[coin]["usd"]
+
     except:
         return "Error"
 
