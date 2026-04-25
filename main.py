@@ -5,36 +5,42 @@ import os
 
 TOKEN = os.getenv("TOKEN")
 
+# Monedas a revisar
 coins = {
     "TRX/USDT": "tron",
     "ADA/USDT": "cardano",
     "DOGE/USDT": "dogecoin"
 }
 
-coins = {
-    "TRX/USDT": "tron",
-    "ADA/USDT": "cardano",
-    "DOGE/USDT": "dogecoin"
-}
-
+# Obtener datos desde CoinGecko mostrando error real
 def datos_coin(id_coin):
-    ids = {
-        "tron": "tron",
-        "cardano": "cardano",
-        "dogecoin": "dogecoin"
-    }
-
     try:
-        url = f"https://api.coincap.io/v2/assets/{ids[id_coin]}"
-        r = requests.get(url, timeout=10).json()["data"]
+        url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids={id_coin}"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
 
-        precio = float(r["priceUsd"])
-        cambio = float(r["changePercent24Hr"])
+        r = requests.get(url, headers=headers, timeout=10)
+
+        # si no responde 200
+        r.raise_for_status()
+
+        data = r.json()
+
+        if not data:
+            return "Sin datos", None
+
+        precio = data[0]["current_price"]
+        cambio = data[0]["price_change_percentage_24h"]
 
         return precio, cambio
-    except Exception as e:
-        return None, None
 
+    except Exception as e:
+        return f"ERROR: {str(e)}", None
+
+
+# Estado del mercado
 def estado(cambio):
     if cambio is None:
         return "Error"
@@ -45,48 +51,34 @@ def estado(cambio):
     else:
         return "Lateral ➖"
 
+
+# Comando start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot activo. Usa /scan")
 
+
+# Comando scan
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Escaneando mercado...")
 
-    resultados = []
-
-    texto = "ESCÁNER ULTRA V2\n\n"
+    texto = "ESCÁNER DEBUG V1\n\n"
 
     for par, coin in coins.items():
         precio, cambio = datos_coin(coin)
-        est = estado(cambio)
 
-        texto += f"{par}: {est}\n"
-
-        if precio:
-            resultados.append((par, precio, cambio))
-
-    if resultados:
-        mejor = max(resultados, key=lambda x: x[2])
-
-        par = mejor[0]
-        precio = mejor[1]
-
-        entrada = round(precio * 0.997, 6)
-        tp = round(precio * 1.005, 6)
-        sl = round(precio * 0.992, 6)
-
-        confianza = min(max(int(50 + mejor[2] * 10), 55), 90)
-
-        texto += f"\nMEJOR OPCIÓN: {par}\n"
-        texto += f"Entrada ideal: {entrada}\n"
-        texto += f"TP: {tp}\n"
-        texto += f"SL: {sl}\n"
-        texto += f"Confianza: {confianza}%"
+        if cambio is None:
+            texto += f"{par}: {precio}\n\n"
+        else:
+            texto += f"{par}: {precio} USD | {estado(cambio)} | {round(cambio,2)}%\n"
 
     await update.message.reply_text(texto)
 
+
+# Inicializar bot
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("scan", scan))
 
+print("Bot iniciado...")
 app.run_polling()
