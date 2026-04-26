@@ -1,5 +1,6 @@
 import requests
 import os
+import time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -12,7 +13,7 @@ from telegram.ext import (
 TOKEN = os.getenv("TOKEN")
 
 # =========================
-# PARES A ANALIZAR
+# CONFIG
 # =========================
 coins = {
     "TRX/USDT": "tron",
@@ -20,9 +21,18 @@ coins = {
     "DOGE/USDT": "dogecoin"
 }
 
+# Guarda último escaneo exitoso
+ultimo_scan = {
+    "mejor_par": None,
+    "precio": None,
+    "cambio": None,
+    "confianza": None,
+    "timestamp": None
+}
+
 
 # =========================
-# CONSULTA PRECIOS
+# API
 # =========================
 def datos_coin(id_coin):
     try:
@@ -75,47 +85,18 @@ def confianza(cambio):
     return int(score)
 
 
-def accion(cambio):
-    if cambio is None:
-        return "Sin datos"
-    elif cambio >= 1:
-        return "Esperar retroceso"
-    elif -0.50 <= cambio < 1:
-        return "Entrada prudente"
-    else:
-        return "No entrar"
-
-
 # =========================
-# MEJOR PAR
-# =========================
-def mejor_par():
-    lista = []
-
-    for par, coin in coins.items():
-        precio, cambio = datos_coin(coin)
-
-        if precio is not None:
-            lista.append((par, precio, cambio))
-
-    if not lista:
-        return None
-
-    # Menor volatilidad = más estable
-    mejor = sorted(lista, key=lambda x: abs(x[2]))[0]
-
-    return mejor
-
-
-# =========================
-# ESCANEO GENERAL
+# ESCANEO
 # =========================
 def escanear():
-    texto = "ESCÁNER ULTRA V6.5\n\n"
+    global ultimo_scan
+
+    texto = "ESCÁNER ULTRA V6.51\n\n"
 
     lista = []
 
     for par, coin in coins.items():
+
         precio, cambio = datos_coin(coin)
 
         if precio is None:
@@ -123,11 +104,13 @@ def escanear():
             continue
 
         texto += f"{par}: {estado(cambio)} | {round(cambio,2)}%\n"
+
         lista.append((par, precio, cambio))
 
     if not lista:
         return texto + "\nSin datos."
 
+    # Elegir más estable
     mejor = sorted(lista, key=lambda x: abs(x[2]))[0]
 
     par = mejor[0]
@@ -135,6 +118,13 @@ def escanear():
     cambio = mejor[2]
 
     conf = confianza(cambio)
+
+    # Guardar resultado
+    ultimo_scan["mejor_par"] = par
+    ultimo_scan["precio"] = precio
+    ultimo_scan["cambio"] = cambio
+    ultimo_scan["confianza"] = conf
+    ultimo_scan["timestamp"] = int(time.time())
 
     texto += "\n------------------\n"
 
@@ -152,20 +142,23 @@ def escanear():
 # PREPARAR ENTRADA
 # =========================
 def preparar_entrada():
-    dato = mejor_par()
 
-    if dato is None:
-        return "Sin datos de mercado."
+    if ultimo_scan["mejor_par"] is None:
+        return "Primero usa 🔍 Escanear"
 
-    par, precio, cambio = dato
-    conf = confianza(cambio)
+    par = ultimo_scan["mejor_par"]
+    precio = ultimo_scan["precio"]
+    cambio = ultimo_scan["cambio"]
+    conf = ultimo_scan["confianza"]
 
     if cambio < -0.50 or conf < 65:
-        return "🚫 Hoy no conviene entrar."
+        return "🚫 Último escaneo indicó no operar."
 
     entrada = round(precio * 0.997, 6)
     tp = round(precio * 1.005, 6)
     sl = round(precio * 0.992, 6)
+
+    segundos = int(time.time()) - ultimo_scan["timestamp"]
 
     texto = f"""
 📌 ENTRADA PREPARADA
@@ -179,35 +172,34 @@ Take Profit: {tp}
 Stop Loss: {sl}
 
 Confianza: {conf}%
-Riesgo: Bajo/Medio
+Datos de hace: {segundos} seg
 Monto sugerido: 10 USDT
 """
+
     return texto
 
 
 # =========================
-# CAPITAL
+# RUTA CAPITAL
 # =========================
 def ruta_20():
-    texto = """
+    return """
 💰 RUTA A 20 USDT
 
 Capital actual: 10 USDT
 
 Meta:
-+0.20 USDT promedio por operación buena
++0.20 USDT promedio
 
-Necesitas aprox:
-50 operaciones limpias
+Necesitas:
+50 operaciones limpias aprox.
 
-Regla:
-Solo operar cuando confianza > 70%
+Solo entrar con confianza > 70%
 """
-    return texto
 
 
 # =========================
-# COMANDO START
+# START
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -224,7 +216,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        "SCANNER ULTRA BOT V6.5",
+        "SCANNER ULTRA BOT V6.51",
         reply_markup=reply_markup
     )
 
