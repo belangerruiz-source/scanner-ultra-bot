@@ -3,265 +3,120 @@ import os
 import time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-    CallbackQueryHandler
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 TOKEN = os.getenv("TOKEN")
 
-# =========================
-# CONFIG
-# =========================
 coins = {
     "TRX/USDT": "tron",
     "ADA/USDT": "cardano",
     "DOGE/USDT": "dogecoin"
 }
 
-# Guarda último escaneo exitoso
-ultimo_scan = {
-    "mejor_par": None,
-    "precio": None,
-    "cambio": None,
-    "confianza": None,
-    "timestamp": None
-}
+cache = {}
 
-
-# =========================
-# API
-# =========================
-def datos_coin(id_coin):
+def precio(coin):
     try:
-        url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids={id_coin}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-
-        r = requests.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-
+        url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids={coin}"
+        r = requests.get(url, timeout=10)
         data = r.json()[0]
-
-        precio = float(data["current_price"])
-        cambio = float(data["price_change_percentage_24h"])
-
-        return precio, cambio
-
+        return float(data["current_price"]), float(data["price_change_percentage_24h"])
     except:
         return None, None
 
+def scan_market():
+    global cache
 
-# =========================
-# REGLAS
-# =========================
-def estado(cambio):
-    if cambio is None:
-        return "Error"
-    elif cambio >= 1:
-        return "Fuerte 📈"
-    elif cambio <= -1:
-        return "Débil 📉"
-    else:
-        return "Lateral ➖"
-
-
-def confianza(cambio):
-    if cambio is None:
-        return 0
-
-    score = 72 - abs(cambio * 8)
-
-    if cambio > 0:
-        score += 8
-
-    if score < 55:
-        score = 55
-
-    if score > 90:
-        score = 90
-
-    return int(score)
-
-
-# =========================
-# ESCANEO
-# =========================
-def escanear():
-    global ultimo_scan
-
-    texto = "ESCÁNER ULTRA V6.51\n\n"
-
-    lista = []
+    texto = "ESCÁNER ULTRA PRO V1\n\n"
+    datos = []
 
     for par, coin in coins.items():
+        p, c = precio(coin)
 
-        precio, cambio = datos_coin(coin)
-
-        if precio is None:
+        if p is None:
             texto += f"{par}: Error\n"
             continue
 
-        texto += f"{par}: {estado(cambio)} | {round(cambio,2)}%\n"
+        texto += f"{par}: {round(p,6)} | {round(c,2)}%\n"
+        datos.append((par,p,c))
 
-        lista.append((par, precio, cambio))
+    if not datos:
+        return "Sin datos."
 
-    if not lista:
-        return texto + "\nSin datos."
+    mejor = sorted(datos, key=lambda x: abs(x[2]))[0]
 
-    # Elegir más estable
-    mejor = sorted(lista, key=lambda x: abs(x[2]))[0]
+    cache = {
+        "par": mejor[0],
+        "precio": mejor[1],
+        "cambio": mejor[2],
+        "time": int(time.time())
+    }
 
-    par = mejor[0]
-    precio = mejor[1]
-    cambio = mejor[2]
-
-    conf = confianza(cambio)
-
-    # Guardar resultado
-    ultimo_scan["mejor_par"] = par
-    ultimo_scan["precio"] = precio
-    ultimo_scan["cambio"] = cambio
-    ultimo_scan["confianza"] = conf
-    ultimo_scan["timestamp"] = int(time.time())
-
-    texto += "\n------------------\n"
-
-    if cambio < -0.50 or conf < 65:
-        texto += "🚫 NO OPERAR HOY\nMercado sin ventaja clara."
-        return texto
-
-    texto += f"✅ Mejor opción: {par}\n"
-    texto += f"Confianza: {conf}%"
-
+    texto += f"\n✅ Mejor opción: {mejor[0]}"
     return texto
 
+def preparar():
+    if not cache:
+        return "Primero pulsa 🔍 Escanear"
 
-# =========================
-# PREPARAR ENTRADA
-# =========================
-def preparar_entrada():
+    p = cache["precio"]
+    par = cache["par"]
 
-    if ultimo_scan["mejor_par"] is None:
-        return "Primero usa 🔍 Escanear"
+    entrada = round(p * 0.997, 6)
+    tp = round(p * 1.005, 6)
+    sl = round(p * 0.992, 6)
 
-    par = ultimo_scan["mejor_par"]
-    precio = ultimo_scan["precio"]
-    cambio = ultimo_scan["cambio"]
-    conf = ultimo_scan["confianza"]
-
-    if cambio < -0.50 or conf < 65:
-        return "🚫 Último escaneo indicó no operar."
-
-    entrada = round(precio * 0.997, 6)
-    tp = round(precio * 1.005, 6)
-    sl = round(precio * 0.992, 6)
-
-    segundos = int(time.time()) - ultimo_scan["timestamp"]
-
-    texto = f"""
+    return f"""
 📌 ENTRADA PREPARADA
 
 Par: {par}
 
-Precio actual: {precio}
 Compra límite: {entrada}
-
 Take Profit: {tp}
 Stop Loss: {sl}
 
-Confianza: {conf}%
-Datos de hace: {segundos} seg
 Monto sugerido: 10 USDT
 """
 
-    return texto
-
-
-# =========================
-# RUTA CAPITAL
-# =========================
-def ruta_20():
-    return """
-💰 RUTA A 20 USDT
-
-Capital actual: 10 USDT
-
-Meta:
-+0.20 USDT promedio
-
-Necesitas:
-50 operaciones limpias aprox.
-
-Solo entrar con confianza > 70%
-"""
-
-
-# =========================
-# START
-# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    keyboard = [
+    kb = [
         [InlineKeyboardButton("🔍 Escanear", callback_data="scan")],
-        [InlineKeyboardButton("✅ Preparar Entrada", callback_data="entrar")],
-        [
-            InlineKeyboardButton("📊 Estado", callback_data="estado"),
-            InlineKeyboardButton("💰 Ruta 20", callback_data="ruta")
-        ],
-        [InlineKeyboardButton("🛑 No operar", callback_data="cerrar")]
+        [InlineKeyboardButton("✅ Preparar Entrada", callback_data="prep")],
+        [InlineKeyboardButton("📊 Estado", callback_data="estado")],
+        [InlineKeyboardButton("💰 Ruta 20", callback_data="ruta")],
+        [InlineKeyboardButton("🛑 No operar", callback_data="stop")]
     ]
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
-        "SCANNER ULTRA BOT V6.51",
-        reply_markup=reply_markup
+        "SCANNER ULTRA BOT PRO",
+        reply_markup=InlineKeyboardMarkup(kb)
     )
 
-
-# =========================
-# COMANDO /SCAN
-# =========================
-async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Escaneando mercado...")
-    await update.message.reply_text(escanear())
-
-
-# =========================
-# BOTONES
-# =========================
 async def botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
 
-    query = update.callback_query
-    await query.answer()
+    if q.data == "scan":
+        await q.message.reply_text("Escaneando...")
+        await q.message.reply_text(scan_market())
 
-    if query.data == "scan":
-        await query.message.reply_text("Escaneando mercado...")
-        await query.message.reply_text(escanear())
+    elif q.data == "prep":
+        await q.message.reply_text(preparar())
 
-    elif query.data == "entrar":
-        await query.message.reply_text(preparar_entrada())
+    elif q.data == "estado":
+        await q.message.reply_text("Sistema activo ✅")
 
-    elif query.data == "estado":
-        await query.message.reply_text("Sistema activo ✅")
+    elif q.data == "ruta":
+        await q.message.reply_text("Meta: 10 USDT → 20 USDT")
 
-    elif query.data == "ruta":
-        await query.message.reply_text(ruta_20())
+    elif q.data == "stop":
+        await q.message.reply_text("Hoy no operamos 🛑")
 
-    elif query.data == "cerrar":
-        await query.message.reply_text("🛑 Confirmado: hoy no operamos.")
-
-
-# =========================
-# APP
-# =========================
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("scan", scan))
 app.add_handler(CallbackQueryHandler(botones))
 
-print("Bot iniciado...")
+print("BOT PRO INICIADO")
 app.run_polling()
