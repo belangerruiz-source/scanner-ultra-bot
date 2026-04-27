@@ -136,6 +136,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔎 Escaneando mercado...")
 
     resultados = []
+    errores = ""
 
     for par, coin in PARES.items():
         try:
@@ -149,9 +150,34 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 **analisis
             })
 
-        except:
-            pass
+        except Exception as e:
+            errores += f"{par}: {str(e)}\n"
 
+    if not resultados:
+        await update.message.reply_text(
+            "❌ No se pudo obtener mercado.\n\n" + errores
+        )
+        return
+
+    resultados.sort(key=lambda x: x["score"], reverse=True)
+    mejor = resultados[0]
+
+    texto = "📊 ESCÁNER V3.1\n\n"
+
+    for r in resultados:
+        texto += (
+            f"{r['par']}\n"
+            f"Precio: {r['precio']:.6f}\n"
+            f"{r['senal']}\n"
+            f"Confianza: {r['score']}%\n\n"
+        )
+
+    texto += f"✅ Mejor opción: {mejor['par']}"
+
+    if errores:
+        texto += "\n\n⚠️ Errores:\n" + errores
+
+    await update.message.reply_text(texto)
     if not resultados:
         await update.message.reply_text("❌ No se pudo obtener mercado.")
         return
