@@ -1,249 +1,296 @@
-import requests
 import os
-import time
+import json
+import requests
+from statistics import mean
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes
-)
+# =====================================================
+# CONFIG
+# =====================================================
 
 TOKEN = os.getenv("TOKEN")
+ARCHIVO = "capital.json"
 
-# =========================
-# CONFIG
-# =========================
-coins = {
+PARES = {
     "TRX/USDT": "tron",
     "ADA/USDT": "cardano",
     "DOGE/USDT": "dogecoin"
 }
 
-cache = {}
+# =====================================================
+# UTILIDADES CAPITAL
+# =====================================================
+
+def cargar_data():
+    if not os.path.exists(ARCHIVO):
+        return {
+            "capital_inicial": 0,
+            "capital_actual": 0,
+            "meta": 20,
+            "historial": []
+        }
+
+    with open(ARCHIVO, "r") as f:
+        return json.load(f)
 
 
-# =========================
-# API COINGECKO
-# =========================
-def precio(coin_id):
-    try:
-        url = (
-            "https://api.coingecko.com/api/v3/coins/markets"
-            f"?vs_currency=usd&ids={coin_id}"
-        )
-
-        headers = {"User-Agent": "Mozilla/5.0"}
-
-        r = requests.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-
-        data = r.json()
-
-        if not data:
-            return None, None
-
-        item = data[0]
-
-        p = float(item["current_price"])
-        c = float(item["price_change_percentage_24h"])
-
-        return p, c
-
-    except Exception:
-        return None, None
+def guardar_data(data):
+    with open(ARCHIVO, "w") as f:
+        json.dump(data, f)
 
 
-# =========================
-# REGLAS
-# =========================
-def estado(cambio):
-    if cambio is None:
-        return "Error"
-    if cambio >= 1:
-        return "Fuerte 📈"
-    if cambio <= -1:
-        return "Débil 📉"
-    return "Lateral ➖"
+def siguiente_meta(actual):
+    metas = [20, 30, 50, 75, 100, 150, 250, 500]
+    for m in metas:
+        if actual < m:
+            return m
+    return actual + 250
 
 
-def confianza(cambio):
-    if cambio is None:
-        return 0
+# =====================================================
+# API PRECIOS
+# =====================================================
 
-    score = 80 - abs(cambio * 10)
-
-    if cambio > 0:
-        score += 5
-
-    if score < 55:
-        score = 55
-
-    if score > 92:
-        score = 92
-
-    return int(score)
-
-
-# =========================
-# ESCANEO
-# =========================
-def scan_market():
-    global cache
-
-    texto = "ESCÁNER ULTRA PRO V2\n\n"
-    datos = []
-
-    for par, coin in coins.items():
-
-        p, c = precio(coin)
-
-        if p is None:
-            texto += f"{par}: Error\n"
-            continue
-
-        texto += f"{par}: {round(p,6)} USD | {estado(c)} | {round(c,2)}%\n"
-
-        datos.append((par, p, c))
-
-    if not datos:
-        return "Sin datos del mercado."
-
-    # mejor = cambio más cercano a cero
-    mejor = sorted(datos, key=lambda x: abs(x[2]))[0]
-
-    par = mejor[0]
-    p = mejor[1]
-    c = mejor[2]
-    conf = confianza(c)
-
-    cache = {
-        "par": par,
-        "precio": p,
-        "cambio": c,
-        "confianza": conf,
-        "time": int(time.time())
+def precio_y_cambio(coin_id):
+    url = "https://api.coingecko.com/api/v3/coins/markets"
+    params = {
+        "vs_currency": "usd",
+        "ids": coin_id
     }
 
-    texto += "\n------------------\n"
+    r = requests.get(url, params=params, timeout=10)
+    data = r.json()
 
-    if c < -0.60 or conf < 68:
-        texto += "🚫 NO OPERAR HOY\nMercado sin ventaja clara."
-        return texto
+    if not data:
+        raise Exception("Sin datos")
 
-    texto += f"✅ Mejor opción: {par}\n"
-    texto += f"Confianza: {conf}%"
+    precio = float(data[0]["current_price"])
+    cambio = float(data[0]["price_change_percentage_24h"])
 
-    return texto
-
-
-# =========================
-# PREPARAR ENTRADA
-# =========================
-def preparar():
-    if not cache:
-        return "Primero pulsa 🔍 Escanear"
-
-    par = cache["par"]
-    p = cache["precio"]
-    conf = cache["confianza"]
-
-    entrada = round(p * 0.997, 6)
-    tp = round(p * 1.005, 6)
-    sl = round(p * 0.992, 6)
-
-    seg = int(time.time()) - cache["time"]
-
-    return f"""
-📌 ENTRADA PREPARADA
-
-Par: {par}
-
-Precio actual: {p}
-Compra límite: {entrada}
-
-Take Profit: {tp}
-Stop Loss: {sl}
-
-Confianza: {conf}%
-Datos de hace: {seg} seg
-Monto sugerido: 10 USDT
-"""
+    return precio, cambio
 
 
-# =========================
-# RUTA CAPITAL
-# =========================
-def ruta():
-    return """
-💰 RUTA A 20 USDT
+# =====================================================
+# ANALISIS SERIO
+# =====================================================
 
-Capital actual: 10 USDT
+def analizar(precio, cambio):
+    score = 50
 
-Meta:
-+0.20 USDT promedio por trade bueno
+    if cambio > 2:
+        score += 25
+    elif cambio > 0.5:
+        score += 15
+    elif cambio < -2:
+        score -= 25
+    elif cambio < -0.5:
+        score -= 15
 
-Necesitas:
-50 trades limpios aprox.
+    if score >= 75:
+        tendencia = "Fuerte 🚀"
+        señal = "BUY 🟢"
+    elif score >= 60:
+        tendencia = "Alcista 📈"
+        señal = "BUY 🟢"
+    elif score >= 45:
+        tendencia = "Lateral ➖"
+        señal = "WAIT 🟡"
+    else:
+        tendencia = "Débil 📉"
+        señal = "NO TRADE 🔴"
 
-Solo entrar con confianza > 75%
-"""
+    tp = round(precio * 1.018, 6)
+    sl = round(precio * 0.992, 6)
+
+    return {
+        "score": score,
+        "tendencia": tendencia,
+        "senal": señal,
+        "tp": tp,
+        "sl": sl
+    }
 
 
-# =========================
-# START
-# =========================
+# =====================================================
+# COMANDOS TELEGRAM
+# =====================================================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = """
+🤖 ESCÁNER ULTRA V3 SERIO
 
-    kb = [
-        [InlineKeyboardButton("🔍 Escanear", callback_data="scan")],
-        [InlineKeyboardButton("✅ Preparar Entrada", callback_data="prep")],
-        [
-            InlineKeyboardButton("📊 Estado", callback_data="estado"),
-            InlineKeyboardButton("💰 Ruta 20", callback_data="ruta")
-        ],
-        [InlineKeyboardButton("🛑 No operar", callback_data="stop")]
-    ]
+Comandos:
+
+/scan -> analizar mercado
+/capital 10 -> iniciar capital
+/update 12.5 -> actualizar capital
+/status -> ver progreso
+/history -> historial
+/reset -> reiniciar cuenta
+"""
+    await update.message.reply_text(texto)
+
+
+async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔎 Escaneando mercado...")
+
+    resultados = []
+
+    for par, coin in PARES.items():
+        try:
+            precio, cambio = precio_y_cambio(coin)
+            analisis = analizar(precio, cambio)
+
+            resultados.append({
+                "par": par,
+                "precio": precio,
+                "cambio": cambio,
+                **analisis
+            })
+
+        except:
+            pass
+
+    if not resultados:
+        await update.message.reply_text("❌ No se pudo obtener mercado.")
+        return
+
+    resultados.sort(key=lambda x: x["score"], reverse=True)
+    mejor = resultados[0]
+
+    texto = "📊 ESCÁNER ULTRA V3 SERIO\n\n"
+
+    for r in resultados:
+        texto += (
+            f"{r['par']}\n"
+            f"Precio: {r['precio']:.6f}\n"
+            f"{r['tendencia']} | {r['cambio']:.2f}%\n"
+            f"Señal: {r['senal']}\n"
+            f"TP: {r['tp']}\n"
+            f"SL: {r['sl']}\n"
+            f"Confianza: {r['score']}%\n\n"
+        )
+
+    texto += "------------------\n"
+    texto += f"✅ Mejor opción: {mejor['par']}\n"
+    texto += f"Señal: {mejor['senal']}"
+
+    await update.message.reply_text(texto)
+
+
+async def capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usa: /capital 10")
+        return
+
+    monto = float(context.args[0])
+
+    data = {
+        "capital_inicial": monto,
+        "capital_actual": monto,
+        "meta": siguiente_meta(monto),
+        "historial": [monto]
+    }
+
+    guardar_data(data)
 
     await update.message.reply_text(
-        "SCANNER ULTRA BOT PRO V2",
-        reply_markup=InlineKeyboardMarkup(kb)
+        f"💰 Capital iniciado en {monto} USDT\n🎯 Meta actual: {data['meta']} USDT"
     )
 
 
-# =========================
-# BOTONES
-# =========================
-async def botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def update_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usa: /update 12.5")
+        return
 
-    q = update.callback_query
-    await q.answer()
+    monto = float(context.args[0])
+    data = cargar_data()
 
-    if q.data == "scan":
-        await q.message.reply_text("Escaneando mercado...")
-        await q.message.reply_text(scan_market())
+    data["capital_actual"] = monto
+    data["historial"].append(monto)
 
-    elif q.data == "prep":
-        await q.message.reply_text(preparar())
+    if monto >= data["meta"]:
+        vieja = data["meta"]
+        data["meta"] = siguiente_meta(monto)
 
-    elif q.data == "estado":
-        await q.message.reply_text("Sistema activo ✅")
+        guardar_data(data)
 
-    elif q.data == "ruta":
-        await q.message.reply_text(ruta())
+        await update.message.reply_text(
+            f"🎯 Meta {vieja} alcanzada!\n🚀 Nueva meta: {data['meta']} USDT"
+        )
+        return
 
-    elif q.data == "stop":
-        await q.message.reply_text("🛑 Confirmado: hoy no operamos.")
+    guardar_data(data)
+
+    await update.message.reply_text(
+        f"✅ Capital actualizado: {monto} USDT"
+    )
 
 
-# =========================
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = cargar_data()
+
+    actual = data["capital_actual"]
+    inicial = data["capital_inicial"]
+
+    if inicial == 0:
+        await update.message.reply_text("Primero usa /capital")
+        return
+
+    ganancia = actual - inicial
+    porcentaje = (ganancia / inicial) * 100
+
+    faltan = data["meta"] - actual
+
+    texto = (
+        f"📈 ESTADO CUENTA\n\n"
+        f"Inicial: {inicial} USDT\n"
+        f"Actual: {actual} USDT\n"
+        f"Ganancia: {ganancia:.2f} ({porcentaje:.2f}%)\n\n"
+        f"🎯 Meta actual: {data['meta']} USDT\n"
+        f"Faltan: {faltan:.2f} USDT"
+    )
+
+    await update.message.reply_text(texto)
+
+
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = cargar_data()
+
+    if not data["historial"]:
+        await update.message.reply_text("Sin historial.")
+        return
+
+    texto = "📜 HISTORIAL CAPITAL\n\n"
+
+    for i, v in enumerate(data["historial"], start=1):
+        texto += f"{i}. {v} USDT\n"
+
+    await update.message.reply_text(texto)
+
+
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if os.path.exists(ARCHIVO):
+        os.remove(ARCHIVO)
+
+    await update.message.reply_text("♻️ Cuenta reiniciada.")
+
+
+# =====================================================
 # APP
-# =========================
+# =====================================================
+
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(botones))
+app.add_handler(CommandHandler("scan", scan))
+app.add_handler(CommandHandler("capital", capital))
+app.add_handler(CommandHandler("update", update_capital))
+app.add_handler(CommandHandler("status", status))
+app.add_handler(CommandHandler("history", history))
+app.add_handler(CommandHandler("reset", reset))
 
-print("BOT PRO V2 INICIADO")
+print("BOT V3 SERIO ACTIVO")
 app.run_polling()
