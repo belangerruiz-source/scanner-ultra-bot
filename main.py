@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import requests
 from statistics import mean
 from telegram import Update
@@ -12,14 +13,11 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 TOKEN = os.getenv("TOKEN")
 ARCHIVO = "capital.json"
 
-PARES = {
-    "TRX/USDT": "tron",
-    "ADA/USDT": "cardano",
-    "DOGE/USDT": "dogecoin"
-}
+PARES = ["TRXUSDT", "ADAUSDT", "DOGEUSDT"]
+BASE_URL = "https://api.binance.com/api/v3/klines"
 
 # =====================================================
-# UTILIDADES CAPITAL
+# CAPITAL
 # =====================================================
 
 def cargar_data():
@@ -49,165 +47,257 @@ def siguiente_meta(actual):
 
 
 # =====================================================
-# API PRECIOS
+# BINANCE DATA
 # =====================================================
 
-def precio_y_cambio(coin_id):
-    url = "https://api.coingecko.com/api/v3/coins/markets"
+def obtener_klines(symbol, interval="1h", limit=72):
     params = {
-        "vs_currency": "usd",
-        "ids": coin_id
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit
     }
 
-    r = requests.get(url, params=params, timeout=10)
+    r = requests.get(BASE_URL, params=params, timeout=10)
     data = r.json()
 
-    if not data:
+    if not isinstance(data, list):
         raise Exception("Sin datos")
 
-    precio = float(data[0]["current_price"])
-    cambio = float(data[0]["price_change_percentage_24h"])
+    return data
 
-    return precio, cambio
+
+def cierres(klines):
+    return [float(x[4]) for x in klines]
 
 
 # =====================================================
-# ANALISIS SERIO
+# INDICADORES
 # =====================================================
 
-def analizar(precio, cambio):
+def ema(valores, periodo):
+    if len(valores) < periodo:
+        return mean(valores)
+
+    k = 2 / (periodo + 1)
+    ema_actual = mean(valores[:periodo])
+
+    for precio in valores[periodo:]:
+        ema_actual = precio * k + ema_actual * (1 - k)
+
+    return ema_actual
+
+
+def rsi(valores, periodo=14):
+    if len(valores) < periodo + 1:
+        return 50
+
+    ganancias = []
+    perdidas = []
+
+    for i in range(1, periodo + 1):
+        cambio = valores[-i] - valores[-i - 1]
+
+        if cambio >= 0:
+            ganancias.append(cambio)
+        else:
+            perdidas.append(abs(cambio))
+
+    avg_gain = mean(ganancias) if ganancias else 0.0001
+    avg_loss = mean(perdidas) if perdidas else 0.0001
+
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+# =====================================================
+# ANALISIS V4.1
+# =====================================================
+
+def analizar_par(symbol):
+    kl = obtener_klines(symbol, "1h", 72)
+    closes = cierres(kl)
+
+    precio = closes[-1]
+    minimo = min(closes)
+    maximo = max(closes)
+
+    rango = maximo - minimo if maximo != minimo else 0.0001
+    posicion = ((precio - minimo) / rango) * 100
+
+    ema9 = ema(closes, 9)
+    ema21 = ema(closes, 21)
+    valor_rsi = rsi(closes, 14)
+
     score = 50
 
-    if cambio > 2:
-        score += 25
-    elif cambio > 0.5:
+    # Tendencia EMA
+    if ema9 > ema21:
+        score += 18
+    else:
+        score -= 18
+
+    # RSI
+    if 45 <= valor_rsi <= 62:
+        score += 12
+    elif valor_rsi > 72:
+        score -= 10
+    elif valor_rsi < 32:
+        score += 8
+
+    # Posición en rango 72h
+    if posicion < 35:
         score += 15
-    elif cambio < -2:
-        score -= 25
-    elif cambio < -0.5:
+    elif posicion > 78:
         score -= 15
 
-    if score >= 75:
-        tendencia = "Fuerte 🚀"
-        señal = "BUY 🟢"
-    elif score >= 60:
-        tendencia = "Alcista 📈"
-        señal = "BUY 🟢"
-    elif score >= 45:
-        tendencia = "Lateral ➖"
-        señal = "WAIT 🟡"
+    # Momentum últimas 3h
+    ult3 = closes[-1] - closes[-4]
+    if ult3 > 0:
+        score += 8
     else:
-        tendencia = "Débil 📉"
-        señal = "NO TRADE 🔴"
+        score -= 8
 
-    tp = round(precio * 1.018, 6)
-    sl = round(precio * 0.992, 6)
+    score = max(1, min(score, 99))
+
+    # Clasificación
+    if score >= 82:
+        estado = "FUERTE 🟢"
+        operar = "SÍ"
+    elif score >= 70:
+        estado = "BUENA 🟡"
+        operar = "POSIBLE"
+    elif score >= 55:
+        estado = "LATERAL ➖"
+        operar = "MEJOR ESPERAR"
+    else:
+        estado = "DÉBIL 🔴"
+        operar = "NO"
+
+    tp1 = round(precio * 1.006, 6)
+    tp2 = round(precio * 1.011, 6)
+    sl = round(precio * 0.994, 6)
 
     return {
+        "symbol": symbol,
+        "precio": precio,
         "score": score,
-        "tendencia": tendencia,
-        "senal": señal,
-        "tp": tp,
+        "estado": estado,
+        "operar": operar,
+        "rsi": round(valor_rsi, 2),
+        "ema9": round(ema9, 6),
+        "ema21": round(ema21, 6),
+        "posicion": round(posicion, 1),
+        "tp1": tp1,
+        "tp2": tp2,
         "sl": sl
     }
 
 
 # =====================================================
-# COMANDOS TELEGRAM
+# TELEGRAM
 # =====================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = """
-🤖 ESCÁNER ULTRA V3 SERIO
+    txt = """
+🤖 SCANNER ULTRA V4.1 PRO
 
 Comandos:
 
-/scan -> analizar mercado
-/capital 10 -> iniciar capital
-/update 12.5 -> actualizar capital
-/status -> ver progreso
-/history -> historial
-/reset -> reiniciar cuenta
+/scan -> mejor oportunidad
+/deep -> análisis detallado
+/capital 10
+/update 12.4
+/status
+/history
+/reset
 """
-    await update.message.reply_text(texto)
+    await update.message.reply_text(txt)
 
 
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔎 Escaneando mercado...")
+    await update.message.reply_text("🔎 Escaneando mercado profesional...")
 
     resultados = []
-    errores = ""
 
-    for par, coin in PARES.items():
+    for par in PARES:
         try:
-            precio, cambio = precio_y_cambio(coin)
-            analisis = analizar(precio, cambio)
-
-            resultados.append({
-                "par": par,
-                "precio": precio,
-                "cambio": cambio,
-                **analisis
-            })
-
-        except Exception as e:
-            errores += f"{par}: {str(e)}\n"
+            resultados.append(analizar_par(par))
+        except:
+            pass
 
     if not resultados:
-        await update.message.reply_text(
-            "❌ No se pudo obtener mercado.\n\n" + errores
-        )
+        await update.message.reply_text("❌ Error obteniendo mercado.")
         return
 
     resultados.sort(key=lambda x: x["score"], reverse=True)
     mejor = resultados[0]
 
-    texto = "📊 ESCÁNER V3.1\n\n"
+    txt = "📊 SCANNER ULTRA V4.1 PRO\n\n"
 
     for r in resultados:
-        texto += (
-            f"{r['par']}\n"
+        txt += (
+            f"{r['symbol']}\n"
+            f"{r['estado']} | Score {r['score']}\n"
             f"Precio: {r['precio']:.6f}\n"
-            f"{r['senal']}\n"
-            f"Confianza: {r['score']}%\n\n"
+            f"Operar: {r['operar']}\n\n"
         )
 
-    texto += f"✅ Mejor opción: {mejor['par']}"
+    txt += "------------------\n"
+    txt += f"🏆 Mejor opción: {mejor['symbol']}\n"
+    txt += f"Confianza: {mejor['score']}%"
 
-    if errores:
-        texto += "\n\n⚠️ Errores:\n" + errores
+    await update.message.reply_text(txt)
 
-    await update.message.reply_text(texto)
+
+async def deep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📈 Generando análisis profundo...")
+
+    resultados = []
+
+    for par in PARES:
+        try:
+            resultados.append(analizar_par(par))
+        except:
+            pass
+
     if not resultados:
-        await update.message.reply_text("❌ No se pudo obtener mercado.")
+        await update.message.reply_text("❌ Sin datos.")
         return
 
     resultados.sort(key=lambda x: x["score"], reverse=True)
-    mejor = resultados[0]
+    r = resultados[0]
 
-    texto = "📊 ESCÁNER ULTRA V3 SERIO\n\n"
+    txt = f"""
+📌 ANÁLISIS PROFUNDO
 
-    for r in resultados:
-        texto += (
-            f"{r['par']}\n"
-            f"Precio: {r['precio']:.6f}\n"
-            f"{r['tendencia']} | {r['cambio']:.2f}%\n"
-            f"Señal: {r['senal']}\n"
-            f"TP: {r['tp']}\n"
-            f"SL: {r['sl']}\n"
-            f"Confianza: {r['score']}%\n\n"
-        )
+Par: {r['symbol']}
+Precio: {r['precio']:.6f}
 
-    texto += "------------------\n"
-    texto += f"✅ Mejor opción: {mejor['par']}\n"
-    texto += f"Señal: {mejor['senal']}"
+Score: {r['score']}%
+Estado: {r['estado']}
+Operar: {r['operar']}
 
-    await update.message.reply_text(texto)
+RSI: {r['rsi']}
+EMA9: {r['ema9']}
+EMA21: {r['ema21']}
 
+Posición rango 72h: {r['posicion']}%
+
+🎯 Entrada ideal: {r['precio']:.6f}
+TP1: {r['tp1']}
+TP2: {r['tp2']}
+SL: {r['sl']}
+"""
+    await update.message.reply_text(txt)
+
+
+# =====================================================
+# CAPITAL COMMANDS
+# =====================================================
 
 async def capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usa: /capital 10")
+        await update.message.reply_text("Usa /capital 10")
         return
 
     monto = float(context.args[0])
@@ -222,13 +312,13 @@ async def capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
     guardar_data(data)
 
     await update.message.reply_text(
-        f"💰 Capital iniciado en {monto} USDT\n🎯 Meta actual: {data['meta']} USDT"
+        f"💰 Capital inicial: {monto} USDT\n🎯 Meta: {data['meta']} USDT"
     )
 
 
 async def update_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usa: /update 12.5")
+        await update.message.reply_text("Usa /update 12.5")
         return
 
     monto = float(context.args[0])
@@ -244,42 +334,41 @@ async def update_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
         guardar_data(data)
 
         await update.message.reply_text(
-            f"🎯 Meta {vieja} alcanzada!\n🚀 Nueva meta: {data['meta']} USDT"
+            f"🎯 Meta {vieja} lograda.\n🚀 Nueva meta: {data['meta']}"
         )
         return
 
     guardar_data(data)
-
-    await update.message.reply_text(
-        f"✅ Capital actualizado: {monto} USDT"
-    )
+    await update.message.reply_text(f"✅ Capital actualizado: {monto} USDT")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = cargar_data()
 
-    actual = data["capital_actual"]
-    inicial = data["capital_inicial"]
-
-    if inicial == 0:
-        await update.message.reply_text("Primero usa /capital")
+    if data["capital_inicial"] == 0:
+        await update.message.reply_text("Usa /capital primero.")
         return
 
-    ganancia = actual - inicial
-    porcentaje = (ganancia / inicial) * 100
+    ini = data["capital_inicial"]
+    act = data["capital_actual"]
+    gan = act - ini
+    pct = (gan / ini) * 100
 
-    faltan = data["meta"] - actual
+    faltan = data["meta"] - act
 
-    texto = (
-        f"📈 ESTADO CUENTA\n\n"
-        f"Inicial: {inicial} USDT\n"
-        f"Actual: {actual} USDT\n"
-        f"Ganancia: {ganancia:.2f} ({porcentaje:.2f}%)\n\n"
-        f"🎯 Meta actual: {data['meta']} USDT\n"
-        f"Faltan: {faltan:.2f} USDT"
-    )
+    txt = f"""
+📈 ESTADO CUENTA
 
-    await update.message.reply_text(texto)
+Inicial: {ini}
+Actual: {act}
+
+Ganancia: {gan:.2f}
+Rentabilidad: {pct:.2f}%
+
+🎯 Meta: {data['meta']}
+Faltan: {faltan:.2f}
+"""
+    await update.message.reply_text(txt)
 
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -289,12 +378,12 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Sin historial.")
         return
 
-    texto = "📜 HISTORIAL CAPITAL\n\n"
+    txt = "📜 HISTORIAL\n\n"
 
-    for i, v in enumerate(data["historial"], start=1):
-        texto += f"{i}. {v} USDT\n"
+    for i, h in enumerate(data["historial"], 1):
+        txt += f"{i}. {h} USDT\n"
 
-    await update.message.reply_text(texto)
+    await update.message.reply_text(txt)
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -305,18 +394,19 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =====================================================
-# APP
+# RUN
 # =====================================================
 
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("scan", scan))
+app.add_handler(CommandHandler("deep", deep))
 app.add_handler(CommandHandler("capital", capital))
 app.add_handler(CommandHandler("update", update_capital))
 app.add_handler(CommandHandler("status", status))
 app.add_handler(CommandHandler("history", history))
 app.add_handler(CommandHandler("reset", reset))
 
-print("BOT V3 SERIO ACTIVO")
+print("SCANNER ULTRA V4.1 PRO ACTIVO")
 app.run_polling()
