@@ -1,5 +1,5 @@
 # main.py
-# SCANNER ULTRA V6.1 PRO (CON MENÚ)
+# SCANNER ULTRA V6.2 PRO (ESTABLE + FALLBACK)
 
 import requests
 import os
@@ -19,9 +19,9 @@ from telegram.ext import (
 TOKEN = os.getenv("TOKEN")
 
 PAIRS = {
-    "TRX/USDT": "tron",
-    "ADA/USDT": "cardano",
-    "DOGE/USDT": "dogecoin"
+    "TRX/USDT": ("tron", "TRXUSDT"),
+    "ADA/USDT": ("cardano", "ADAUSDT"),
+    "DOGE/USDT": ("dogecoin", "DOGEUSDT")
 }
 
 DATA_FILE = "data.json"
@@ -52,43 +52,77 @@ def guardar_data(data):
 # =========================
 # API
 # =========================
-def precio_actual(coin_id):
+def precio_coingecko(coin_id):
     try:
         url = "https://api.coingecko.com/api/v3/simple/price"
-        r = requests.get(url, params={"ids": coin_id, "vs_currencies": "usd"}, timeout=10)
-        return float(r.json()[coin_id]["usd"])
-    except:
+        r = requests.get(url, params={"ids": coin_id, "vs_currencies": "usd"}, timeout=15)
+
+        if r.status_code != 200:
+            print("CoinGecko error:", r.text)
+            return None
+
+        data = r.json()
+        return float(data[coin_id]["usd"])
+    except Exception as e:
+        print("Error CoinGecko:", e)
         return None
 
 
-def historial_72h(coin_id):
+def precio_binance(symbol):
+    try:
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+        r = requests.get(url, timeout=10)
+
+        if r.status_code != 200:
+            print("Binance error:", r.text)
+            return None
+
+        return float(r.json()["price"])
+    except Exception as e:
+        print("Error Binance:", e)
+        return None
+
+
+def historial_24h(coin_id):
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
         r = requests.get(url, params={
             "vs_currency": "usd",
-            "days": 3,
+            "days": 1,
             "interval": "hourly"
         }, timeout=15)
 
-        return [x[1] for x in r.json()["prices"]]
-    except:
+        data = r.json()
+
+        if "prices" not in data:
+            print("Historial error:", data)
+            return []
+
+        return [x[1] for x in data["prices"]]
+    except Exception as e:
+        print("Error historial:", e)
         return []
 
 
 # =========================
 # ANALISIS
 # =========================
-def analizar(coin_id):
+def analizar(pair, coin_id, symbol):
 
-    precio = precio_actual(coin_id)
-    hist = historial_72h(coin_id)
+    precio = precio_coingecko(coin_id)
+
+    # fallback
+    if precio is None:
+        precio = precio_binance(symbol)
+
+    hist = historial_24h(coin_id)
 
     if precio is None or len(hist) < 10:
         return None
 
-    prom = statistics.mean(hist[-24:])
-    minimo = min(hist[-24:])
-    maximo = max(hist[-24:])
+    prom = statistics.mean(hist[-12:])
+    minimo = min(hist[-12:])
+    maximo = max(hist[-12:])
     cambio = ((precio - hist[-2]) / hist[-2]) * 100
     volatilidad = ((maximo - minimo) / minimo) * 100
 
@@ -104,7 +138,7 @@ def analizar(coin_id):
     else:
         score -= 10
 
-    if volatilidad > 2:
+    if volatilidad > 1:
         score += 15
 
     rango = (precio - minimo) / (maximo - minimo + 1e-9)
@@ -152,7 +186,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = ReplyKeyboardMarkup(teclado, resize_keyboard=True)
 
     await update.message.reply_text(
-        "🤖 Scanner Ultra V6.1\n\nSelecciona una opción:",
+        "🤖 Scanner Ultra V6.2 PRO\n\nSelecciona una opción:",
         reply_markup=reply_markup
     )
 
@@ -165,25 +199,25 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = cargar_data()
 
     if data["bloqueado"]:
-        await update.message.reply_text("🚫 Bloqueado por pérdidas. Usa Reset")
+        await update.message.reply_text("🚫 Bloqueado por pérdidas")
         return
 
     await update.message.reply_text("Escaneando mercado...")
 
     resultados = []
 
-    for pair, coin_id in PAIRS.items():
-        r = analizar(coin_id)
+    for pair, (coin_id, symbol) in PAIRS.items():
+        r = analizar(pair, coin_id, symbol)
         if r:
             resultados.append((pair, r))
 
     if not resultados:
-        await update.message.reply_text("Error en datos")
+        await update.message.reply_text("❌ Error en datos de mercado")
         return
 
     resultados.sort(key=lambda x: x[1]["confianza"], reverse=True)
 
-    texto = "📊 ESCÁNER V6.1\n\n"
+    texto = "📊 ESCÁNER V6.2 PRO\n\n"
 
     for pair, r in resultados:
         texto += f"{pair} | {r['decision']} | {r['confianza']}%\n"
@@ -201,7 +235,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Confianza: {r['confianza']}%"
         )
     else:
-        texto += "\n⚠️ No operar ahora"
+        texto += "\n⚠️ No operar"
 
     await update.message.reply_text(texto)
 
@@ -223,7 +257,6 @@ async def operar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         monto = float(context.args[0])
-
         riesgo = data["capital"] * 0.05
 
         if monto > riesgo:
@@ -242,7 +275,7 @@ async def operar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Operación registrada")
 
     except:
-        await update.message.reply_text("Error en formato")
+        await update.message.reply_text("Formato incorrecto")
 
 
 # =========================
@@ -348,5 +381,5 @@ app.add_handler(CommandHandler("reset", reset))
 
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu))
 
-print("BOT V6.1 PRO ACTIVO")
+print("BOT V6.2 PRO ACTIVO")
 app.run_polling()
