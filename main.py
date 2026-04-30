@@ -1,51 +1,46 @@
 # main.py
-# ESCÁNER ULTRA V4.1 PRO - FIX ESTABLE
-# Telegram + CoinGecko + análisis 72h
+# ESCÁNER ULTRA V6 PRO
 
 import requests
 import os
 import json
 import statistics
+from datetime import datetime
+
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TOKEN")
 
-# =========================
-# CONFIG
-# =========================
 PAIRS = {
     "TRX/USDT": "tron",
     "ADA/USDT": "cardano",
     "DOGE/USDT": "dogecoin"
 }
 
-CAPITAL_FILE = "capital.json"
-
+DATA_FILE = "data.json"
 
 # =========================
-# CAPITAL
+# DATA
 # =========================
-def cargar_capital():
+def cargar_data():
     try:
-        with open(CAPITAL_FILE, "r") as f:
+        with open(DATA_FILE, "r") as f:
             return json.load(f)
     except:
         data = {
             "capital": 10.0,
-            "meta": 20.0
+            "meta": 20.0,
+            "operaciones": [],
+            "bloqueado": False
         }
-        guardar_capital(data)
+        guardar_data(data)
         return data
 
 
-def guardar_capital(data):
-    with open(CAPITAL_FILE, "w") as f:
-        json.dump(data, f)
+def guardar_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 
 # =========================
@@ -54,13 +49,8 @@ def guardar_capital(data):
 def precio_actual(coin_id):
     try:
         url = "https://api.coingecko.com/api/v3/simple/price"
-        params = {
-            "ids": coin_id,
-            "vs_currencies": "usd"
-        }
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json()
-        return float(data[coin_id]["usd"])
+        r = requests.get(url, params={"ids": coin_id, "vs_currencies": "usd"}, timeout=10)
+        return float(r.json()[coin_id]["usd"])
     except:
         return None
 
@@ -68,18 +58,13 @@ def precio_actual(coin_id):
 def historial_72h(coin_id):
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-        params = {
+        r = requests.get(url, params={
             "vs_currency": "usd",
             "days": 3,
             "interval": "hourly"
-        }
+        }, timeout=15)
 
-        r = requests.get(url, params=params, timeout=15)
-        data = r.json()
-
-        precios = [x[1] for x in data["prices"]]
-        return precios
-
+        return [x[1] for x in r.json()["prices"]]
     except:
         return []
 
@@ -88,64 +73,61 @@ def historial_72h(coin_id):
 # ANALISIS
 # =========================
 def analizar(coin_id):
-    actual = precio_actual(coin_id)
+
+    precio = precio_actual(coin_id)
     hist = historial_72h(coin_id)
 
-    if actual is None or len(hist) < 10:
+    if precio is None or len(hist) < 10:
         return None
 
     prom = statistics.mean(hist[-24:])
     minimo = min(hist[-24:])
     maximo = max(hist[-24:])
-
-    cambio = ((actual - hist[-2]) / hist[-2]) * 100
-
+    cambio = ((precio - hist[-2]) / hist[-2]) * 100
     volatilidad = ((maximo - minimo) / minimo) * 100
 
     score = 0
 
-    # precio sobre promedio
-    if actual > prom:
+    if precio > prom:
         score += 25
     else:
-        score -= 15
+        score -= 10
 
-    # impulso
     if cambio > 0:
         score += 25
     else:
-        score -= 15
+        score -= 10
 
-    # volatilidad útil
     if volatilidad > 2:
+        score += 15
+
+    rango = (precio - minimo) / (maximo - minimo + 1e-9)
+
+    if rango < 0.4:
         score += 20
-
-    # cerca del mínimo = buena entrada
-    rango = (actual - minimo) / (maximo - minimo + 0.0000001)
-
-    if rango < 0.35:
-        score += 25
     elif rango > 0.75:
         score -= 20
 
-    confianza = max(50, min(96, 50 + score))
+    confianza = max(50, min(95, 50 + score))
 
     if confianza >= 80:
-        estado = "Fuerte 🚀"
-    elif confianza >= 68:
-        estado = "Moderado 📈"
+        decision = "ENTRAR"
+    elif confianza >= 65:
+        decision = "ESPERAR"
     else:
-        estado = "Lateral ➖"
+        decision = "NO OPERAR"
 
-    sl = round(actual * 0.985, 6)
-    tp = round(actual * 1.018, 6)
+    entrada = precio * 0.995 if decision == "ENTRAR" else None
+    sl = entrada * 0.985 if entrada else None
+    tp = entrada * 1.02 if entrada else None
 
     return {
-        "precio": actual,
-        "estado": estado,
+        "precio": precio,
         "confianza": confianza,
-        "sl": sl,
-        "tp": tp,
+        "decision": decision,
+        "entrada": round(entrada, 6) if entrada else None,
+        "sl": round(sl, 6) if sl else None,
+        "tp": round(tp, 6) if tp else None,
         "cambio": round(cambio, 2)
     }
 
@@ -153,96 +135,152 @@ def analizar(coin_id):
 # =========================
 # BOT
 # =========================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "ESCÁNER ULTRA V4.1 PRO ACTIVO\n\n"
-        "/scan = escanear\n"
-        "/capital = ver capital\n"
-        "/sumar 2.5 = añadir ganancia\n"
-        "/restar 1 = pérdida"
-    )
-
-
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    data = cargar_data()
+
+    if data["bloqueado"]:
+        await update.message.reply_text("🚫 BLOQUEADO por pérdidas consecutivas. Usa /reset")
+        return
+
     await update.message.reply_text("Escaneando mercado...")
 
     resultados = []
 
-    texto = "ESCÁNER ULTRA V4.1 PRO\n\n"
-
     for pair, coin_id in PAIRS.items():
         r = analizar(coin_id)
-
         if r:
-            texto += (
-                f"{pair}\n"
-                f"{r['precio']:.6f} USD | {r['estado']} | {r['cambio']}%\n"
-                f"Confianza: {r['confianza']}%\n\n"
-            )
             resultados.append((pair, r))
-        else:
-            texto += f"{pair}: Error\n\n"
 
-    if resultados:
-        mejor = max(resultados, key=lambda x: x[1]["confianza"])
+    if not resultados:
+        await update.message.reply_text("Error en datos de mercado")
+        return
 
-        pair = mejor[0]
-        r = mejor[1]
+    # Ranking
+    resultados.sort(key=lambda x: x[1]["confianza"], reverse=True)
 
+    texto = "ESCÁNER ULTRA V6 PRO\n\n"
+
+    for pair, r in resultados:
         texto += (
-            "------------------\n"
-            f"✅ Mejor opción: {pair}\n"
-            f"Entrada: {r['precio']:.6f}\n"
-            f"SL: {r['sl']:.6f}\n"
-            f"TP: {r['tp']:.6f}\n"
+            f"{pair} | {r['decision']} | {r['confianza']}%\n"
+        )
+
+    mejor = resultados[0]
+    pair, r = mejor
+
+    if r["decision"] == "ENTRAR":
+        texto += (
+            "\n------------------\n"
+            f"🔥 TRADE:\n{pair}\n\n"
+            f"Entrada: {r['entrada']}\n"
+            f"SL: {r['sl']}\n"
+            f"TP: {r['tp']}\n"
             f"Confianza: {r['confianza']}%"
         )
+    else:
+        texto += "\n⚠️ Mercado no óptimo"
 
     await update.message.reply_text(texto)
 
 
-async def capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = cargar_capital()
+# =========================
+# OPERACIONES
+# =========================
+async def operar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    data = cargar_data()
+
+    if data["bloqueado"]:
+        await update.message.reply_text("🚫 No puedes operar. Estás bloqueado.")
+        return
+
+    try:
+        monto = float(context.args[0])
+
+        riesgo = data["capital"] * 0.05
+        if monto > riesgo:
+            await update.message.reply_text(f"⚠️ Riesgo alto. Máximo recomendado: {round(riesgo,2)}")
+            return
+
+        op = {
+            "fecha": str(datetime.now()),
+            "monto": monto,
+            "resultado": "pendiente"
+        }
+
+        data["operaciones"].append(op)
+        guardar_data(data)
+
+        await update.message.reply_text("Operación registrada")
+
+    except:
+        await update.message.reply_text("Uso: /operar 2")
+
+
+async def win(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = cargar_data()
+
+    for op in reversed(data["operaciones"]):
+        if op["resultado"] == "pendiente":
+            ganancia = op["monto"] * 0.02
+            data["capital"] += ganancia
+            op["resultado"] = "ganada"
+            break
+
+    data["bloqueado"] = False
+    guardar_data(data)
+
+    await update.message.reply_text(f"✅ Capital: {round(data['capital'],2)}")
+
+
+async def loss(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = cargar_data()
+
+    consecutivas = 0
+
+    for op in reversed(data["operaciones"]):
+        if op["resultado"] == "pendiente":
+            perdida = op["monto"] * 0.015
+            data["capital"] -= perdida
+            op["resultado"] = "perdida"
+            break
+
+    # contar pérdidas seguidas
+    for op in reversed(data["operaciones"]):
+        if op["resultado"] == "perdida":
+            consecutivas += 1
+        else:
+            break
+
+    if consecutivas >= 2:
+        data["bloqueado"] = True
+
+    guardar_data(data)
+
+    await update.message.reply_text(f"❌ Capital: {round(data['capital'],2)}")
+
+
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = cargar_data()
+    data["bloqueado"] = False
+    guardar_data(data)
+    await update.message.reply_text("🔓 Bloqueo removido")
+
+
+async def resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = cargar_data()
+
+    ganadas = sum(1 for op in data["operaciones"] if op["resultado"] == "ganada")
+    perdidas = sum(1 for op in data["operaciones"] if op["resultado"] == "perdida")
 
     await update.message.reply_text(
-        f"Capital actual: {data['capital']} USDT\n"
-        f"Meta actual: {data['meta']} USDT"
+        f"Capital: {data['capital']} USDT\n"
+        f"Meta: {data['meta']} USDT\n"
+        f"Ganadas: {ganadas}\n"
+        f"Perdidas: {perdidas}\n"
+        f"Bloqueado: {data['bloqueado']}"
     )
-
-
-async def sumar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        valor = float(context.args[0])
-        data = cargar_capital()
-
-        data["capital"] += valor
-
-        if data["capital"] >= data["meta"]:
-            data["meta"] += 10
-
-        guardar_capital(data)
-
-        await update.message.reply_text(
-            f"Nuevo capital: {round(data['capital'],2)} USDT\n"
-            f"Nueva meta: {data['meta']} USDT"
-        )
-    except:
-        await update.message.reply_text("Usa: /sumar 2.5")
-
-
-async def restar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        valor = float(context.args[0])
-        data = cargar_capital()
-
-        data["capital"] -= valor
-        guardar_capital(data)
-
-        await update.message.reply_text(
-            f"Capital actual: {round(data['capital'],2)} USDT"
-        )
-    except:
-        await update.message.reply_text("Usa: /restar 1")
 
 
 # =========================
@@ -250,11 +288,12 @@ async def restar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 app = ApplicationBuilder().token(TOKEN).build()
 
-app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("scan", scan))
-app.add_handler(CommandHandler("capital", capital))
-app.add_handler(CommandHandler("sumar", sumar))
-app.add_handler(CommandHandler("restar", restar))
+app.add_handler(CommandHandler("operar", operar))
+app.add_handler(CommandHandler("win", win))
+app.add_handler(CommandHandler("loss", loss))
+app.add_handler(CommandHandler("reset", reset))
+app.add_handler(CommandHandler("resumen", resumen))
 
-print("BOT V4.1 PRO ONLINE")
+print("BOT V6 PRO ONLINE")
 app.run_polling()
