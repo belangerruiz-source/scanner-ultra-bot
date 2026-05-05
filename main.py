@@ -1,56 +1,81 @@
 import requests
-import os
-import json
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import os
+import json
 
 TOKEN = os.getenv("TOKEN")
-DATA_FILE = "capital.json"
 
-# ------------------ UTIL ------------------
+# ==============================
+# CAPITAL STORAGE
+# ==============================
 
-def cargar_datos():
-    if not os.path.exists(DATA_FILE):
-        return {"capital": 10, "objetivo": 20, "operaciones": []}
-    with open(DATA_FILE, "r") as f:
+FILE = "capital.json"
+
+def cargar_capital():
+    if not os.path.exists(FILE):
+        data = {
+            "capital": 10.0,
+            "meta": 20.0,
+            "trades": []
+        }
+        with open(FILE, "w") as f:
+            json.dump(data, f)
+    with open(FILE, "r") as f:
         return json.load(f)
 
-def guardar_datos(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+def guardar_capital(data):
+    with open(FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
-def precio(symbol):
+# ==============================
+# API BINANCE (ESTABLE)
+# ==============================
+
+def obtener_data(symbol):
     try:
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-        data = requests.get(url, timeout=5).json()
-        return float(data["price"])
-    except:
+        url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
+        r = requests.get(url, timeout=5)
+
+        if r.status_code != 200:
+            return None
+
+        data = r.json()
+
+        precio = float(data["lastPrice"])
+        cambio = float(data["priceChangePercent"])
+
+        return precio, cambio
+
+    except Exception as e:
+        print("ERROR API:", e)
         return None
 
-# ------------------ SCANNER ------------------
+# ==============================
+# ANALISIS
+# ==============================
 
 def analizar(symbol):
-    p1 = precio(symbol)
-    p2 = precio(symbol)
+    data = obtener_data(symbol)
 
-    if not p1 or not p2:
+    if not data:
         return None
 
-    cambio = ((p2 - p1) / p1) * 100
+    precio_actual, cambio = data
 
-    if cambio > 0.3:
-        estado = "Fuerte 🚀"
+    if cambio > 1:
+        estado = "Fuerte "
         confianza = 90
-    elif cambio < -0.3:
-        estado = "Débil 📉"
+    elif cambio < -1:
+        estado = "D�bil "
         confianza = 70
     else:
-        estado = "Lateral ➖"
-        confianza = 50
+        estado = "Lateral "
+        confianza = 55
 
-    entrada = p2
-    sl = entrada * 0.985
-    tp = entrada * 1.02
+    entrada = precio_actual
+    sl = entrada * 0.99
+    tp = entrada * 1.015
 
     return {
         "symbol": symbol,
@@ -62,46 +87,61 @@ def analizar(symbol):
         "tp": round(tp, 6)
     }
 
-# ------------------ COMANDOS ------------------
+# ==============================
+# COMANDOS TELEGRAM
+# ==============================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 SCANNER ULTRA V7 PRO\n\n"
-        "/scan → Analizar mercado\n"
-        "/buy monto precio par\n"
-        "/sell monto precio par\n"
-        "/capital → Ver estado\n"
-        "/stats → Estadísticas\n"
+        " SCANNER ULTRA V7.1 FIX\n\n"
+        "Comandos:\n"
+        "/scan - Escanear mercado\n"
+        "/buy - Registrar compra\n"
+        "/sell - Registrar venta\n"
+        "/stats - Ver progreso"
     )
 
-# ------------------ SCAN ------------------
+# ==============================
+# SCAN
+# ==============================
 
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔎 Escaneando mercado...")
+    await update.message.reply_text(" Escaneando mercado...")
 
     pares = ["TRXUSDT", "ADAUSDT", "DOGEUSDT"]
-
     resultados = []
+
     for p in pares:
         r = analizar(p)
         if r:
             resultados.append(r)
+        else:
+            resultados.append({
+                "symbol": p,
+                "precio": "Error",
+                "estado": "Sin datos",
+                "cambio": 0,
+                "confianza": 0,
+                "sl": "-",
+                "tp": "-"
+            })
 
-    if not resultados:
-        await update.message.reply_text("❌ Error obteniendo datos")
+    # filtrar v�lidos
+    validos = [r for r in resultados if r["confianza"] > 0]
+
+    if not validos:
+        await update.message.reply_text(" No se pudo obtener datos del mercado")
         return
 
-    mejor = max(resultados, key=lambda x: x["confianza"])
+    mejor = max(validos, key=lambda x: x["confianza"])
 
-    texto = "📊 ESCÁNER ULTRA V7\n\n"
+    texto = " ESC�NER ULTRA V7.1\n\n"
 
     for r in resultados:
-        texto += f"{r['symbol']}\n"
-        texto += f"{r['precio']} USD | {r['estado']} | {r['cambio']}%\n"
-        texto += f"Confianza: {r['confianza']}%\n\n"
+        texto += f"{r['symbol']} | {r['estado']} | {r['cambio']}%\n"
 
-    texto += "------------------\n"
-    texto += f"🔥 TRADE: {mejor['symbol']}\n"
+    texto += "\n------------------\n"
+    texto += f" TRADE: {mejor['symbol']}\n"
     texto += f"Entrada: {mejor['precio']}\n"
     texto += f"SL: {mejor['sl']}\n"
     texto += f"TP: {mejor['tp']}\n"
@@ -109,116 +149,88 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(texto)
 
-# ------------------ BUY ------------------
+# ==============================
+# REGISTRO
+# ==============================
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         monto = float(context.args[0])
-        precio_compra = float(context.args[1])
-        par = context.args[2]
+        precio = float(context.args[1])
 
-        data = cargar_datos()
+        data = cargar_capital()
 
-        operacion = {
+        trade = {
             "tipo": "buy",
             "monto": monto,
-            "precio": precio_compra,
-            "par": par
+            "precio": precio
         }
 
-        data["operaciones"].append(operacion)
-        guardar_datos(data)
+        data["trades"].append(trade)
+        guardar_capital(data)
 
-        await update.message.reply_text(f"✅ Compra registrada: {par} {monto} USDT")
+        await update.message.reply_text(" Compra registrada")
 
     except:
-        await update.message.reply_text("❌ Uso: /buy monto precio par")
-
-# ------------------ SELL ------------------
+        await update.message.reply_text(" Uso: /buy monto precio")
 
 async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         monto = float(context.args[0])
-        precio_venta = float(context.args[1])
-        par = context.args[2]
+        precio = float(context.args[1])
 
-        data = cargar_datos()
+        data = cargar_capital()
 
-        # buscar última compra
         compra = None
-        for op in reversed(data["operaciones"]):
-            if op["tipo"] == "buy" and op["par"] == par:
-                compra = op
+        for t in reversed(data["trades"]):
+            if t["tipo"] == "buy":
+                compra = t
                 break
 
         if not compra:
-            await update.message.reply_text("❌ No hay compra previa")
+            await update.message.reply_text(" No hay compra registrada")
             return
 
         ganancia = monto - compra["monto"]
         data["capital"] += ganancia
 
-        operacion = {
+        trade = {
             "tipo": "sell",
             "monto": monto,
-            "precio": precio_venta,
-            "par": par,
-            "resultado": round(ganancia, 4)
+            "precio": precio,
+            "ganancia": ganancia
         }
 
-        data["operaciones"].append(operacion)
-        guardar_datos(data)
+        data["trades"].append(trade)
+        guardar_capital(data)
 
         await update.message.reply_text(
-            f"💰 Venta registrada\n"
-            f"Resultado: {round(ganancia,4)} USDT\n"
-            f"Capital actual: {round(data['capital'],2)} USDT"
+            f" Venta registrada\nGanancia: {round(ganancia,2)} USDT"
         )
 
     except:
-        await update.message.reply_text("❌ Uso: /sell monto precio par")
+        await update.message.reply_text(" Uso: /sell monto precio")
 
-# ------------------ CAPITAL ------------------
-
-async def capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = cargar_datos()
-
-    capital_actual = data["capital"]
-    objetivo = data["objetivo"]
-
-    await update.message.reply_text(
-        f"💼 Capital actual: {round(capital_actual,2)} USDT\n"
-        f"🎯 Objetivo: {objetivo} USDT\n"
-        f"📈 Progreso: {round((capital_actual/objetivo)*100,2)}%"
-    )
-
-# ------------------ STATS ------------------
+# ==============================
+# STATS
+# ==============================
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = cargar_datos()
+    data = cargar_capital()
 
-    wins = 0
-    losses = 0
-
-    for op in data["operaciones"]:
-        if op.get("resultado"):
-            if op["resultado"] > 0:
-                wins += 1
-            else:
-                losses += 1
-
-    total = wins + losses
-    winrate = (wins / total * 100) if total > 0 else 0
+    capital = data["capital"]
+    meta = data["meta"]
 
     await update.message.reply_text(
-        f"📊 Estadísticas\n\n"
-        f"Operaciones: {total}\n"
-        f"Ganadas: {wins}\n"
-        f"Perdidas: {losses}\n"
-        f"Winrate: {round(winrate,2)}%"
+        f" PROGRESO\n\n"
+        f"Capital: {round(capital,2)} USDT\n"
+        f"Meta: {meta} USDT\n"
+        f"Falta: {round(meta - capital,2)} USDT"
     )
 
-# ------------------ APP ------------------
+# ==============================
+# APP
+# ==============================
 
 app = ApplicationBuilder().token(TOKEN).build()
 
@@ -226,7 +238,6 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("scan", scan))
 app.add_handler(CommandHandler("buy", buy))
 app.add_handler(CommandHandler("sell", sell))
-app.add_handler(CommandHandler("capital", capital))
 app.add_handler(CommandHandler("stats", stats))
 
 app.run_polling()
