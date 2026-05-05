@@ -1,6 +1,8 @@
 import requests
-import os
+import asyncio
 import json
+import os
+from statistics import mean
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -8,173 +10,189 @@ TOKEN = os.getenv("TOKEN")
 
 PARES = ["TRXUSDT", "ADAUSDT", "DOGEUSDT"]
 
-CAPITAL_FILE = "capital.json"
+STATE_FILE = "estado.json"
 
 # ==============================
-# CAPITAL
+# ESTADO BOT
 # ==============================
 
-def cargar_capital():
-    if not os.path.exists(CAPITAL_FILE):
-        data = {"capital": 10.0, "meta": 20.0, "historial": []}
-        guardar_capital(data)
+def cargar_estado():
+    if not os.path.exists(STATE_FILE):
+        data = {"activo": False}
+        guardar_estado(data)
         return data
-    with open(CAPITAL_FILE, "r") as f:
+    with open(STATE_FILE, "r") as f:
         return json.load(f)
 
-def guardar_capital(data):
-    with open(CAPITAL_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+def guardar_estado(data):
+    with open(STATE_FILE, "w") as f:
+        json.dump(data, f)
 
 # ==============================
-# DATOS MERCADO (COINGECKO)
+# BINANCE DATA
 # ==============================
 
-def get_price(symbol):
+def get_klines(symbol):
     try:
-        mapa = {
-            "TRXUSDT": "tron",
-            "ADAUSDT": "cardano",
-            "DOGEUSDT": "dogecoin"
-        }
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=30"
+        r = requests.get(url, timeout=5)
 
-        coin = mapa[symbol]
+        if r.status_code != 200:
+            return None
 
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd"
-        data = requests.get(url, timeout=10).json()
-
-        return float(data[coin]["usd"])
+        data = r.json()
+        closes = [float(candle[4]) for candle in data]
+        return closes
     except:
         return None
 
 # ==============================
-# ANÁLISIS
+# ANALISIS
 # ==============================
 
-def analizar(precio):
-    # Simulación de variación simple
-    import random
-    cambio = random.uniform(-3, 3)
+def analizar(closes):
+    actual = closes[-1]
+    promedio = mean(closes[-10:])
+    cambio = ((actual - promedio) / promedio) * 100
 
-    if cambio > 1.5:
+    if cambio > 1:
         estado = "Fuerte "
-        confianza = random.randint(80, 95)
-    elif cambio < -1.5:
+        confianza = min(95, int(abs(cambio) * 40))
+    elif cambio < -1:
         estado = "Débil "
-        confianza = random.randint(80, 95)
+        confianza = min(95, int(abs(cambio) * 40))
     else:
         estado = "Lateral "
-        confianza = random.randint(50, 70)
+        confianza = 50
 
-    return estado, cambio, confianza
+    return estado, cambio, confianza, actual
 
 # ==============================
-# SCAN
+# SCAN LOGICA
 # ==============================
 
-async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(" Escaneando mercado...")
-
+def scan_market():
     resultados = []
-
-    for par in PARES:
-        precio = get_price(par)
-
-        if precio is None:
-            resultados.append((par, "Error", 0, 0, 0))
-            continue
-
-        estado, cambio, confianza = analizar(precio)
-
-        resultados.append((par, estado, cambio, confianza, precio))
-
-    texto = " ESCÁNER V7 REBUILD\n\n"
-
     mejor = None
 
-    for par, estado, cambio, confianza, precio in resultados:
-        if estado == "Error":
-            texto += f"{par}: Error\n"
+    for par in PARES:
+        closes = get_klines(par)
+
+        if closes is None:
             continue
 
-        texto += f"{par}: {precio:.6f} | {estado} | {cambio:.2f}%\n"
+        estado, cambio, confianza, precio = analizar(closes)
+        resultados.append((par, estado, cambio, confianza, precio))
 
         if mejor is None or confianza > mejor[3]:
             mejor = (par, estado, cambio, confianza, precio)
 
     if mejor and mejor[1] != "Lateral ":
         entrada = mejor[4]
-        sl = entrada * 0.985
-        tp = entrada * 1.02
+        sl = entrada * 0.992
+        tp = entrada * 1.008
 
-        texto += f"\n TRADE: {mejor[0]}"
-        texto += f"\nEntrada: {entrada:.6f}"
-        texto += f"\nSL: {sl:.6f}"
-        texto += f"\nTP: {tp:.6f}"
-        texto += f"\nConfianza: {mejor[3]}%"
-    else:
-        texto += "\n\n No operar (mercado lateral)"
+        return {
+            "par": mejor[0],
+            "entrada": entrada,
+            "sl": sl,
+            "tp": tp,
+            "confianza": mejor[3]
+        }
 
-    await update.message.reply_text(texto)
-
-# ==============================
-# REGISTRAR OPERACIÓN
-# ==============================
-
-async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        ganancia = float(context.args[0])
-
-        data = cargar_capital()
-        data["capital"] += ganancia
-        data["historial"].append(ganancia)
-
-        guardar_capital(data)
-
-        await update.message.reply_text(
-            f" Operación registrada\n"
-            f"Resultado: {ganancia} USDT\n"
-            f"Capital actual: {data['capital']:.2f} USDT"
-        )
-
-    except:
-        await update.message.reply_text("Uso: /registrar 0.18")
+    return None
 
 # ==============================
-# STATUS
+# LOOP AUTOMATICO
 # ==============================
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = cargar_capital()
+async def auto_scan(app):
+    while True:
+        estado = cargar_estado()
 
-    await update.message.reply_text(
-        f" Capital: {data['capital']:.2f} USDT\n"
-        f" Meta: {data['meta']} USDT\n"
-        f" Operaciones: {len(data['historial'])}"
-    )
+        if estado["activo"]:
+            print("Escaneando automático...")
+
+            trade = scan_market()
+
+            if trade:
+                mensaje = (
+                    f" TRADE DETECTADO\n\n"
+                    f"{trade['par']}\n"
+                    f"Entrada: {trade['entrada']:.6f}\n"
+                    f"SL: {trade['sl']:.6f}\n"
+                    f"TP: {trade['tp']:.6f}\n"
+                    f"Confianza: {trade['confianza']}%"
+                )
+
+                # enviar a TODOS los chats activos
+                if "chats" in estado:
+                    for chat_id in estado["chats"]:
+                        await app.bot.send_message(chat_id=chat_id, text=mensaje)
+
+        await asyncio.sleep(1800)  # 30 minutos
 
 # ==============================
-# START
+# COMANDOS TELEGRAM
 # ==============================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    estado = cargar_estado()
+
+    chat_id = update.effective_chat.id
+
+    if "chats" not in estado:
+        estado["chats"] = []
+
+    if chat_id not in estado["chats"]:
+        estado["chats"].append(chat_id)
+        guardar_estado(estado)
+
     await update.message.reply_text(
-        " BOT V7 REBUILD ACTIVO\n\n"
-        "Comandos:\n"
-        "/scan\n"
-        "/registrar +ganancia\n"
+        " BOT AUTO SCAN\n\n"
+        "/activar\n"
+        "/desactivar\n"
         "/status"
     )
+
+async def activar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    estado = cargar_estado()
+    estado["activo"] = True
+    guardar_estado(estado)
+
+    await update.message.reply_text(" Auto-scan ACTIVADO")
+
+async def desactivar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    estado = cargar_estado()
+    estado["activo"] = False
+    guardar_estado(estado)
+
+    await update.message.reply_text(" Auto-scan DESACTIVADO")
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    estado = cargar_estado()
+    estado_txt = "ACTIVO" if estado["activo"] else "INACTIVO"
+
+    await update.message.reply_text(f"Estado: {estado_txt}")
 
 # ==============================
 # APP
 # ==============================
 
-app = ApplicationBuilder().token(TOKEN).build()
+async def main():
+    app = ApplicationBuilder().token(TOKEN).build()
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("scan", scan))
-app.add_handler(CommandHandler("registrar", registrar))
-app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("activar", activar))
+    app.add_handler(CommandHandler("desactivar", desactivar))
+    app.add_handler(CommandHandler("status", status))
 
-app.run_polling()
+    # iniciar loop automático
+    app.create_task(auto_scan(app))
+
+    print("BOT CLOUD CORRIENDO...")
+    await app.run_polling()
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
