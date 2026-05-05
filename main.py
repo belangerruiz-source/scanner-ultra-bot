@@ -1,101 +1,82 @@
 import requests
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    CallbackQueryHandler
+)
 import os
 
 TOKEN = os.getenv("TOKEN")
 
 # ==============================
-# FALLBACK COINGECKO
+# CONFIG
 # ==============================
 
-COINGECKO_IDS = {
+COINS = {
     "TRXUSDT": "tron",
     "ADAUSDT": "cardano",
     "DOGEUSDT": "dogecoin"
 }
 
-def precio_coingecko(symbol):
-    try:
-        coin_id = COINGECKO_IDS[symbol]
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
-        r = requests.get(url, timeout=5)
-
-        if r.status_code != 200:
-            return None
-
-        return float(r.json()[coin_id]["usd"])
-
-    except:
-        return None
-
 # ==============================
-# BINANCE
+# DATOS (ANTI-FALLO)
 # ==============================
 
-def precio_binance(symbol):
+def get_price(symbol):
+    # intento Binance
     try:
         url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
         r = requests.get(url, timeout=5)
-
-        if r.status_code != 200:
-            return None
-
-        return float(r.json()["price"])
-
+        if r.status_code == 200:
+            return float(r.json()["price"]), "Binance"
     except:
-        return None
+        pass
 
-# ==============================
-# SISTEMA INTELIGENTE
-# ==============================
-
-def obtener_precio(symbol):
-    precio = precio_binance(symbol)
-
-    if precio:
-        fuente = "Binance"
-        return precio, fuente
-
-    precio = precio_coingecko(symbol)
-
-    if precio:
-        fuente = "CoinGecko"
-        return precio, fuente
+    # fallback CoinGecko
+    try:
+        coin = COINS[symbol]
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd"
+        r = requests.get(url, timeout=5)
+        if r.status_code == 200:
+            return float(r.json()[coin]["usd"]), "CoinGecko"
+    except:
+        pass
 
     return None, "Error"
 
 # ==============================
-# ANALISIS SIMPLE (ESTABLE)
+# ANALISIS
 # ==============================
 
-def analizar(symbol):
-    precio, fuente = obtener_precio(symbol)
+def analyze(symbol):
+    price, source = get_price(symbol)
 
-    if not precio:
+    if not price:
         return None
 
-    # Simulación de tendencia básica
-    if precio % 2 > 1:
-        estado = "Fuerte "
-        confianza = 80
+    # lógica simple pero estable
+    if price % 2 > 1:
+        trend = "Fuerte "
+        confidence = 80
     else:
-        estado = "Lateral "
-        confianza = 60
+        trend = "Lateral "
+        confidence = 60
 
-    entrada = precio * 0.998
-    sl = entrada * 0.99
-    tp = entrada * 1.015
+    entry = price * 0.998
+    sl = entry * 0.99
+    tp = entry * 1.015
 
     return {
         "symbol": symbol,
-        "precio": round(precio, 6),
-        "entrada": round(entrada, 6),
+        "price": round(price, 6),
+        "entry": round(entry, 6),
         "sl": round(sl, 6),
         "tp": round(tp, 6),
-        "estado": estado,
-        "confianza": confianza,
-        "fuente": fuente
+        "trend": trend,
+        "confidence": confidence,
+        "source": source
     }
 
 # ==============================
@@ -103,48 +84,107 @@ def analizar(symbol):
 # ==============================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton(" Escanear mercado", callback_data="scan")]
+    ]
     await update.message.reply_text(
-        " SCANNER ULTRA V7.2 FINAL\n\n"
-        " Anti-fallos activo\n"
-        " Binance + CoinGecko\n\n"
-        "/scan"
+        " SCANNER ULTRA V8\n\nModo rápido activo",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 # ==============================
 # SCAN
 # ==============================
 
-async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(" Escaneando mercado...")
+async def scan_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    pares = ["TRXUSDT", "ADAUSDT", "DOGEUSDT"]
-    resultados = []
+    results = []
 
-    for p in pares:
-        r = analizar(p)
+    for symbol in COINS.keys():
+        r = analyze(symbol)
         if r:
-            resultados.append(r)
+            results.append(r)
 
-    if not resultados:
-        await update.message.reply_text(" Sin datos disponibles")
+    if not results:
+        await query.edit_message_text(" Sin datos")
         return
 
-    mejor = max(resultados, key=lambda x: x["confianza"])
+    best = max(results, key=lambda x: x["confidence"])
 
-    texto = " SCAN V7.2 FINAL\n\n"
+    text = " SCAN V8\n\n"
 
-    for r in resultados:
-        texto += f"{r['symbol']} | {r['estado']} | Fuente: {r['fuente']}\n"
+    keyboard = []
 
-    texto += "\n------------------\n"
-    texto += f" TRADE: {mejor['symbol']}\n"
-    texto += f"Precio: {mejor['precio']}\n"
-    texto += f"Entrada LIMIT: {mejor['entrada']}\n"
-    texto += f"SL: {mejor['sl']}\n"
-    texto += f"TP: {mejor['tp']}\n"
-    texto += f"Confianza: {mejor['confianza']}%"
+    for r in results:
+        text += f"{r['symbol']} | {r['trend']} | {r['confidence']}%\n"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"Operar {r['symbol']}",
+                callback_data=f"trade_{r['symbol']}"
+            )
+        ])
 
-    await update.message.reply_text(texto)
+    text += "\n Mejor opción:\n"
+    text += f"{best['symbol']} ({best['confidence']}%)"
+
+    keyboard.append([InlineKeyboardButton(" Reescanear", callback_data="scan")])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ==============================
+# PREPARAR TRADE
+# ==============================
+
+async def prepare_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    symbol = query.data.split("_")[1]
+
+    r = analyze(symbol)
+
+    if not r:
+        await query.edit_message_text(" Error obteniendo datos")
+        return
+
+    text = f"""
+ TRADE {symbol}
+
+Precio actual: {r['price']}
+Entrada LIMIT: {r['entry']}
+SL: {r['sl']}
+TP: {r['tp']}
+
+Confianza: {r['confidence']}%
+Fuente: {r['source']}
+"""
+
+    keyboard = [
+        [InlineKeyboardButton(" Volver", callback_data="scan")]
+    ]
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ==============================
+# ROUTER
+# ==============================
+
+async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+
+    if query.data == "scan":
+        await scan_market(update, context)
+
+    elif query.data.startswith("trade_"):
+        await prepare_trade(update, context)
 
 # ==============================
 # APP
@@ -153,8 +193,8 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("scan", scan))
+app.add_handler(CallbackQueryHandler(handle_buttons))
 
-print("BOT V7.2 FINAL INICIADO")
+print(" BOT V8 INICIADO")
 
 app.run_polling()
